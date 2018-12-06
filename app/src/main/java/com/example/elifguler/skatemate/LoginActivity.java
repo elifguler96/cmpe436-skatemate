@@ -18,6 +18,8 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
 
+import com.google.gson.Gson;
+
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -138,15 +140,20 @@ public class LoginActivity extends AppCompatActivity {
         @Override
         public void run() {
             try {
-                socket = new Socket("ec2-35-180-63-125.eu-west-3.compute.amazonaws.com", 2909);
+                socket = new Socket("0.tcp.ngrok.io", 10252);
                 in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
 
-                sendMessage(username + "$LOGIN$" + username + "$" + password);
+                Request request = new Request();
+                request.clientUsername = username;
+                request.type = RequestType.LOGIN;
+                request.password = password;
+                sendMessage(new Gson().toJson(request));
 
                 String data;
                 while ((data = in.readLine()) != null) {
-                    if (data.charAt(0) == '1') {
+                    Response response = new Gson().fromJson(data, Response.class);
+                    if (response.code == 1) {
                         Handler handler = new Handler(Looper.getMainLooper());
                         handler.post(new Runnable() {
                             @Override
@@ -157,15 +164,21 @@ public class LoginActivity extends AppCompatActivity {
                                 finish();
                             }
                         });
-                    } else {
+
+                        break;
+                    } else if (response.code == 2) {
                         runOnUiThread(new Runnable() {
                             @Override
                             public void run() {
                                 mPasswordView.setError(getString(R.string.error_incorrect_password));
                             }
                         });
+
+                        break;
                     }
                 }
+
+                closeConnection();
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -179,6 +192,12 @@ public class LoginActivity extends AppCompatActivity {
             } catch (IOException e) {
                 e.printStackTrace();
             }
+        }
+
+        void closeConnection() throws IOException {
+            socket.close();
+            in.close();
+            out.close();
         }
     }
 }

@@ -20,11 +20,11 @@ import com.google.android.gms.maps.SupportMapFragment;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.LatLngBounds;
 import com.google.android.gms.maps.model.MarkerOptions;
+import com.google.gson.Gson;
 
 import java.io.*;
 import java.net.*;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity implements OnMapReadyCallback {
@@ -32,9 +32,9 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
     FloatingActionButton messageButton;
 
     List<Spot> spots = new ArrayList<>();
-    ArrayList<Conversation> conversations = new ArrayList<>();
-
     String clientUsername;
+
+    CheckSpotUpdatesThread checkSpotUpdates;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -48,16 +48,30 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         GetSpotsThread getSpotsThread = new GetSpotsThread();
         getSpotsThread.start();
 
-        CheckSpotUpdatesThread checkSpotUpdates = new CheckSpotUpdatesThread();
+        checkSpotUpdates = new CheckSpotUpdatesThread();
         checkSpotUpdates.start();
 
         messageButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                GetConversationsThread thread = new GetConversationsThread();
-                thread.start();
+                Intent intent = new Intent(context, ConversationActivity.class);
+                intent.putExtra("clientUsername", clientUsername);
+                startActivity(intent);
+                try {
+                    finishAndCloseConnections();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
             }
         });
+    }
+
+    private void finishAndCloseConnections() throws IOException {
+        if (checkSpotUpdates != null) {
+            checkSpotUpdates.closeConnection();
+        }
+
+        finish();
     }
 
     public void showMap() {
@@ -68,24 +82,26 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
 
     @Override
     public void onMapReady(GoogleMap googleMap) {
-        // Add a marker for each spot,
-        // and move the map's camera to the same location.
-        double maxLat = Integer.MIN_VALUE;
-        double maxLng = Integer.MIN_VALUE;
-        double minLat = Integer.MAX_VALUE;
-        double minLng = Integer.MAX_VALUE;
-        for (Spot spot : spots) {
-            LatLng latLng = new LatLng(spot.lat, spot.lng);
-            googleMap.addMarker(new MarkerOptions().position(latLng).title(spot.name));
-            maxLat = Math.max(maxLat, latLng.latitude);
-            maxLng = Math.max(maxLng, latLng.longitude);
-            minLat = Math.min(minLat, latLng.latitude);
-            minLng = Math.min(minLng, latLng.longitude);
-        }
+        if (spots.size() > 0) {
+            // Add a marker for each spot,
+            // and move the map's camera to the same location.
+            double maxLat = Integer.MIN_VALUE;
+            double maxLng = Integer.MIN_VALUE;
+            double minLat = Integer.MAX_VALUE;
+            double minLng = Integer.MAX_VALUE;
+            for (Spot spot : spots) {
+                LatLng latLng = new LatLng(spot.lat, spot.lng);
+                googleMap.addMarker(new MarkerOptions().position(latLng).title(spot.name));
+                maxLat = Math.max(maxLat, latLng.latitude);
+                maxLng = Math.max(maxLng, latLng.longitude);
+                minLat = Math.min(minLat, latLng.latitude);
+                minLng = Math.min(minLng, latLng.longitude);
+            }
 
-        LatLngBounds bounds = new LatLngBounds(new LatLng(minLat, minLng), new LatLng(maxLat, maxLng));
-        CameraUpdate cameraUpdate = CameraUpdateFactory.newLatLngBounds(bounds, 50);
-        googleMap.animateCamera(cameraUpdate);
+            LatLngBounds bounds = new LatLngBounds(new LatLng(minLat, minLng), new LatLng(maxLat, maxLng));
+            CameraUpdate cameraUpdate = CameraUpdateFactory.newLatLngBounds(bounds, 50);
+            googleMap.animateCamera(cameraUpdate);
+        }
 
         googleMap.setOnMapClickListener(new GoogleMap.OnMapClickListener() {
             @Override
@@ -106,7 +122,7 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
                         spots.add(new Spot(name, latLng.latitude, latLng.longitude));
                         showMap();
 
-                        CreateSpotThread thread = new CreateSpotThread(name, "" + latLng.latitude, "" + latLng.longitude);
+                        CreateSpotThread thread = new CreateSpotThread(new Spot(name, latLng.latitude, latLng.longitude));
                         thread.start();
                     }
                 });
@@ -130,33 +146,31 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         @Override
         public void run() {
             try {
-                socket = new Socket("ec2-35-180-63-125.eu-west-3.compute.amazonaws.com", 2909);
+                socket = new Socket("0.tcp.ngrok.io", 10252);
                 in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
 
-                sendMessage(clientUsername + "$GETSPOTS$");
+                Request request = new Request();
+                request.clientUsername = clientUsername;
+                request.type = RequestType.GETSPOTS;
+                sendMessage(new Gson().toJson(request));
 
                 String data;
                 while ((data = in.readLine()) != null) {
-                    if (data.charAt(0) == '5') {
-                        data = data.substring(2);
-
-                        String[] spotStrings = data.split("-");
-                        for (String spot : spotStrings) {
-                            String name = spot.substring(0, spot.indexOf("$"));
-                            double lat = Double.parseDouble(spot.substring(spot.indexOf("$") + 1, spot.lastIndexOf("$")));
-                            double lng = Double.parseDouble(spot.substring(spot.lastIndexOf("$") + 1));
-                            spots.add(new Spot(name, lat, lng));
-                        }
-
+                    Response response = new Gson().fromJson(data, Response.class);
+                    if (response.code == 5) {
+                        spots = response.spots;
                         runOnUiThread(new Runnable() {
                             @Override
                             public void run() {
                                 showMap();
                             }
                         });
+                        break;
                     }
                 }
+
+                closeConnection();
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -170,6 +184,12 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
             } catch (IOException e) {
                 e.printStackTrace();
             }
+        }
+
+        void closeConnection() throws IOException {
+            socket.close();
+            in.close();
+            out.close();
         }
     }
 
@@ -181,14 +201,14 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         @Override
         public void run() {
             try {
-                socket = new Socket("ec2-35-180-63-125.eu-west-3.compute.amazonaws.com", 2909);
+                socket = new Socket("0.tcp.ngrok.io", 10252);
                 in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
 
                 String data;
-                while (true) {
-                    data = in.readLine();
-                    if (data != null && data.equals("11$")) {
+                while (in.ready() && (data = in.readLine()) != null) {
+                    Response response = new Gson().fromJson(data, Response.class);
+                    if (response.code == 11) {
                         GetSpotsThread thread = new GetSpotsThread();
                         thread.start();
                     }
@@ -197,6 +217,12 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
                 e.printStackTrace();
             }
         }
+
+        void closeConnection() throws IOException {
+            socket.close();
+            in.close();
+            out.close();
+        }
     }
 
     class CreateSpotThread extends Thread {
@@ -204,24 +230,27 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
         BufferedReader in;
         BufferedWriter out;
 
-        String name;
-        String lat;
-        String lng;
+        Spot spot;
 
-        CreateSpotThread(String name, String lat, String lng) {
-            this.name = name;
-            this.lat = lat;
-            this.lng = lng;
+        CreateSpotThread(Spot spot) {
+            this.spot = spot;
         }
 
         @Override
         public void run() {
             try {
-                socket = new Socket("ec2-35-180-63-125.eu-west-3.compute.amazonaws.com", 2909);
+                socket = new Socket("0.tcp.ngrok.io", 10252);
                 in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
 
-                sendMessage(clientUsername + "$CREATESPOT$" + name + "$" + lat + "$" + lng);
+                Request request = new Request();
+                request.clientUsername = clientUsername;
+                request.type = RequestType.CREATESPOT;
+                request.spot = spot;
+
+                sendMessage(new Gson().toJson(request));
+
+                closeConnection();
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -236,63 +265,11 @@ public class MainActivity extends AppCompatActivity implements OnMapReadyCallbac
                 e.printStackTrace();
             }
         }
-    }
 
-    class GetConversationsThread extends Thread {
-        Socket socket;
-        BufferedReader in;
-        BufferedWriter out;
-
-        @Override
-        public void run() {
-            try {
-                socket = new Socket("ec2-35-180-63-125.eu-west-3.compute.amazonaws.com", 2909);
-                in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
-
-                sendMessage(clientUsername + "$GETCONVERSATIONS$");
-
-                String data;
-                while ((data = in.readLine()) != null && data.length() > 0) {
-                    if (data.charAt(0) == '3') {
-                        data = data.substring(2);
-
-                        String[] conversationStrings = data.split("-");
-                        for (String conversation : conversationStrings) {
-                            String[] parts = conversation.split("\\.txt\\$");
-                            String[] usernames = parts[0].split("_");
-
-                            String messagesString = parts[1];
-                            ArrayList<String> messagesList = new ArrayList<>(Arrays.asList(messagesString.split("#")));
-                            conversations.add(new Conversation(usernames[0], usernames[1], messagesList));
-                        }
-                    }
-
-
-                    Handler handler = new Handler(Looper.getMainLooper());
-                    handler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            Intent intent = new Intent(context, ConversationActivity.class);
-                            intent.putParcelableArrayListExtra("conversations", conversations);
-                            intent.putExtra("clientUsername", clientUsername);
-                            startActivity(intent);
-                        }
-                    });
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-
-        void sendMessage(String message) {
-            try {
-                out.write(message);
-                out.newLine();
-                out.flush();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+        void closeConnection() throws IOException {
+            socket.close();
+            in.close();
+            out.close();
         }
     }
 }

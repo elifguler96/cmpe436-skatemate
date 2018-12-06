@@ -33,8 +33,8 @@ public class MessageAdapter extends RecyclerView.Adapter<MessageAdapter.MessageA
     public void onBindViewHolder(@NonNull MessageAdapterViewHolder holder, int position) {
         Message message = messageData.get(position);
         if (message != null) {
-            holder.usernameTextView.setText(message.username);
-            holder.messageTextView.setText(message.message);
+            holder.usernameTextView.setText(message.fromUsername);
+            holder.messageTextView.setText(message.messageText);
             holder.dateTextView.setText(message.date);
         }
     }

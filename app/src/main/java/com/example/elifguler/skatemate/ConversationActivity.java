@@ -17,22 +17,29 @@ import android.view.View;
 import android.widget.EditText;
 import android.widget.Toast;
 
+import com.google.gson.Gson;
+
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.net.Socket;
-import java.util.ArrayList;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.List;
 
 public class ConversationActivity extends AppCompatActivity implements ConversationAdapter.ConversationAdapterOnClickHandler {
     FloatingActionButton newConvButton;
     RecyclerView messageListRecyclerView;
     ConversationAdapter conversationAdapter;
+    BinarySemaphore conversationAdapterMutex = new BinarySemaphore(true);
 
     String clientUsername;
-    ArrayList<Conversation> conversations;
+    List<Conversation> conversations;
     Context context = this;
+
+    ReceiveMessageThread receiveMessageThread;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -50,11 +57,11 @@ public class ConversationActivity extends AppCompatActivity implements Conversat
         conversationAdapter = new ConversationAdapter(this);
         messageListRecyclerView.setAdapter(conversationAdapter);
 
-        conversations = getIntent().getParcelableArrayListExtra("conversations");
-        conversationAdapter.setConversationData(conversations, clientUsername);
-
-        ReceiveMessageThread receiveMessageThread = new ReceiveMessageThread();
+        receiveMessageThread = new ReceiveMessageThread();
         receiveMessageThread.start();
+
+        GetConversationsThread getConversationsThread = new GetConversationsThread();
+        getConversationsThread.start();
 
         ActionBar actionBar = getSupportActionBar();
         actionBar.setHomeButtonEnabled(true);
@@ -68,7 +75,7 @@ public class ConversationActivity extends AppCompatActivity implements Conversat
 
                 // Set up the input
                 final EditText input = new EditText(context);
-                input.setHint("Type clientUsername of receiver");
+                input.setHint("Type username of receiver");
                 builder.setView(input);
 
                 // Set up the buttons
@@ -95,7 +102,14 @@ public class ConversationActivity extends AppCompatActivity implements Conversat
 
     @Override
     public boolean onSupportNavigateUp() {
-        finish();
+        Intent intent = new Intent(this, MainActivity.class);
+        intent.putExtra("clientUsername", clientUsername);
+        startActivity(intent);
+        try {
+            finishAndCloseConnections();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
         return true;
     }
 
@@ -105,8 +119,79 @@ public class ConversationActivity extends AppCompatActivity implements Conversat
         intent.putExtra("clientUsername", clientUsername);
         intent.putExtra("toUsername", (conversation.username1.equals(clientUsername)) ?
                 conversation.username2 : conversation.username1);
-        intent.putStringArrayListExtra("messages", conversation.messageStrings);
+        intent.putExtra("messagesJson", new Gson().toJson(conversation.messages.toArray(), Message[].class));
         startActivity(intent);
+        try {
+            finishAndCloseConnections();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void finishAndCloseConnections() throws IOException {
+        if (receiveMessageThread != null) {
+            receiveMessageThread.closeConnection();
+        }
+
+        finish();
+    }
+
+    class GetConversationsThread extends Thread {
+        Socket socket;
+        BufferedReader in;
+        BufferedWriter out;
+
+        @Override
+        public void run() {
+            try {
+                socket = new Socket("0.tcp.ngrok.io", 10252);
+                in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+
+                final Request request = new Request();
+                request.clientUsername = clientUsername;
+                request.type = RequestType.GETCONVERSATIONS;
+                sendMessage(new Gson().toJson(request));
+
+                String data;
+                while ((data = in.readLine()) != null) {
+                    Response response = new Gson().fromJson(data, Response.class);
+                    if (response.code == 3) {
+                        conversations = response.conversations;
+                        final String temp = clientUsername;
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                conversationAdapterMutex.P();
+                                conversationAdapter.setConversationData(conversations, temp);
+                                conversationAdapterMutex.V();
+                            }
+                        });
+                        break;
+                    }
+                }
+
+                closeConnection();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        void sendMessage(String message) {
+            try {
+                out.write(message);
+                out.newLine();
+                out.flush();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        void closeConnection() throws IOException {
+            socket.close();
+            in.close();
+            out.close();
+        }
     }
 
     class ReceiveMessageThread extends Thread {
@@ -117,56 +202,86 @@ public class ConversationActivity extends AppCompatActivity implements Conversat
         @Override
         public void run() {
             try {
-                socket = new Socket("ec2-35-180-63-125.eu-west-3.compute.amazonaws.com", 2909);
+                socket = new Socket("0.tcp.ngrok.io", 10252);
                 in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
 
+                Request request = new Request();
+                request.clientUsername = clientUsername;
+                // to send the clientUsername
+                request.type = RequestType.SENDMESSAGE;
+                request.message = new Message("", clientUsername, "", "");
+                sendMessage(new Gson().toJson(request));
+
                 String data;
-                while ((data = in.readLine()) != null && data.length() > 0) {
-                    if (data.charAt(0) == '9') {
-                        String username = data.substring(2, data.indexOf("$"));
-                        String message = data.substring(data.indexOf("$") + 1);
+                while ((data = in.readLine()) != null) {
+                    Response response = new Gson().fromJson(data, Response.class);
+                    if (response.code == 9) {
+                        Message message = response.message;
+
+                        String username1;
+                        String username2;
+                        if (message.fromUsername.compareTo(message.toUsername) < 0) {
+                            username1 = message.fromUsername;
+                            username2 = message.toUsername;
+                        } else {
+                            username1 = message.toUsername;
+                            username2 = message.fromUsername;
+                        }
+
+                        boolean conversationExists = false;
                         for (Conversation c : conversations) {
-                            if (c.username1.equals(username) || c.username2.equals(username)) {
-                                c.messageStrings.add(message);
+                            if (c.username1.equals(username1) && c.username2.equals(username2)) {
+                                c.messages.add(message);
                                 final String temp = clientUsername;
                                 runOnUiThread(new Runnable() {
                                     @Override
                                     public void run() {
+                                        conversationAdapterMutex.P();
                                         conversationAdapter.setConversationData(conversations, temp);
+                                        conversationAdapterMutex.V();
                                     }
                                 });
-                                break;
+                                conversationExists = true;
                             }
                         }
 
-                        String username1;
-                        String username2;
-                        if (clientUsername.compareTo(username) < 0) {
-                            username1 = clientUsername;
-                            username2 = username;
-                        } else {
-                            username1 = username;
-                            username2 = clientUsername;
+                        if (!conversationExists) {
+                            Conversation conversation = new Conversation(username1, username2);
+                            conversation.messages.add(message);
+                            conversations.add(conversation);
+
+                            final String temp = clientUsername;
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    conversationAdapterMutex.P();
+                                    conversationAdapter.setConversationData(conversations, temp);
+                                    conversationAdapterMutex.V();
+                                }
+                            });
                         }
-
-                        ArrayList<String> list = new ArrayList<>();
-                        list.add(message);
-                        Conversation conversation = new Conversation(username1, username2, list);
-                        conversations.add(conversation);
-
-                        final String temp = clientUsername;
-                        runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                conversationAdapter.setConversationData(conversations, temp);
-                            }
-                        });
                     }
                 }
             } catch (IOException e) {
                 e.printStackTrace();
             }
+        }
+
+        void sendMessage(String message) {
+            try {
+                out.write(message);
+                out.newLine();
+                out.flush();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        void closeConnection() throws IOException {
+            socket.close();
+            in.close();
+            out.close();
         }
     }
 
@@ -184,38 +299,72 @@ public class ConversationActivity extends AppCompatActivity implements Conversat
         @Override
         public void run() {
             try {
-                socket = new Socket("ec2-35-180-63-125.eu-west-3.compute.amazonaws.com", 2909);
+                socket = new Socket("0.tcp.ngrok.io", 10252);
                 in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
 
-                sendMessage(clientUsername + "$SENDMESSAGE$" + username + "$" + "");
+                Message message = new Message(clientUsername, username, "Hey!", new SimpleDateFormat().format(new Date()));
+
+                Request request = new Request();
+                request.clientUsername = clientUsername;
+                request.type = RequestType.SENDMESSAGE;
+                request.message = message;
+                sendMessage(new Gson().toJson(request));
 
                 String data;
-                while ((data = in.readLine()) != null && data.length() > 0) {
-                    if (data.charAt(0) == '8') {
+                while ((data = in.readLine()) != null) {
+                    Response response = new Gson().fromJson(data, Response.class);
+                    if (response.code == 8) {
                         runOnUiThread(new Runnable() {
                             @Override
                             public void run() {
                                 Toast.makeText(context, "User doesn't exist", Toast.LENGTH_SHORT).show();
                             }
                         });
-                    } else {
-                        String username = data.substring(2, data.indexOf("$"));
-                        String message = data.substring(data.indexOf("$") + 1);
+
+                        break;
+                    } else if (response.code == 7){
+                        String username1;
+                        String username2;
+                        if (message.fromUsername.compareTo(message.toUsername) < 0) {
+                            username1 = message.fromUsername;
+                            username2 = message.toUsername;
+                        } else {
+                            username1 = message.toUsername;
+                            username2 = message.fromUsername;
+                        }
+
                         Conversation conversation = null;
                         for (Conversation c : conversations) {
-                            if (c.username1.equals(username) || c.username2.equals(username)) {
-                                c.messageStrings.add(message);
+                            if (c.username1.equals(username1) && c.username2.equals(username2)) {
+                                c.messages.add(message);
                                 final String temp = clientUsername;
                                 runOnUiThread(new Runnable() {
                                     @Override
                                     public void run() {
+                                        conversationAdapterMutex.P();
                                         conversationAdapter.setConversationData(conversations, temp);
+                                        conversationAdapterMutex.V();
                                     }
                                 });
                                 conversation = c;
-                                break;
                             }
+                        }
+
+                        if (conversation == null) {
+                            conversation = new Conversation(username1, username2);
+                            conversation.messages.add(message);
+                            conversations.add(conversation);
+
+                            final String temp = clientUsername;
+                            runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    conversationAdapterMutex.P();
+                                    conversationAdapter.setConversationData(conversations, temp);
+                                    conversationAdapterMutex.V();
+                                }
+                            });
                         }
 
                         final Conversation temp = conversation;
@@ -227,12 +376,18 @@ public class ConversationActivity extends AppCompatActivity implements Conversat
                                 intent.putExtra("clientUsername", clientUsername);
                                 intent.putExtra("toUsername", (temp.username1.equals(clientUsername)) ?
                                         temp.username2 : temp.username1);
-                                intent.putStringArrayListExtra("messages", new ArrayList<String>());
+                                intent.putExtra("messagesJson", new Gson().toJson(temp.messages.toArray(), Message[].class));
                                 startActivity(intent);
                             }
                         });
+
+                        break;
                     }
                 }
+
+                closeConnection();
+
+                finishAndCloseConnections();
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -246,6 +401,12 @@ public class ConversationActivity extends AppCompatActivity implements Conversat
             } catch (IOException e) {
                 e.printStackTrace();
             }
+        }
+
+        void closeConnection() throws IOException {
+            socket.close();
+            in.close();
+            out.close();
         }
     }
 }

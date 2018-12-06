@@ -1,46 +1,26 @@
 package com.example.elifguler.skatemate;
 
-import android.os.Parcel;
-import android.os.Parcelable;
+import com.google.gson.annotations.SerializedName;
 
-public class Message implements Parcelable {
-    String username;
-    String message;
-    String date;
+import java.io.Serializable;
 
-    public Message(String username, String message, String date) {
-        this.username = username;
-        this.message = message;
+public class Message implements Serializable {
+    @SerializedName("fromUsernameame")
+    public String fromUsername;
+
+    @SerializedName("toUsername")
+    public String toUsername;
+
+    @SerializedName("messageText")
+    public String messageText;
+
+    @SerializedName("date")
+    public String date;
+
+    public Message(String fromUsername, String toUsername, String messageText, String date) {
+        this.fromUsername = fromUsername;
+        this.toUsername = toUsername;
+        this.messageText = messageText;
         this.date = date;
-    }
-
-    protected Message(Parcel in) {
-        username = in.readString();
-        message = in.readString();
-        date = in.readString();
-    }
-
-    public static final Creator<Message> CREATOR = new Creator<Message>() {
-        @Override
-        public Message createFromParcel(Parcel in) {
-            return new Message(in);
-        }
-
-        @Override
-        public Message[] newArray(int size) {
-            return new Message[size];
-        }
-    };
-
-    @Override
-    public int describeContents() {
-        return 0;
-    }
-
-    @Override
-    public void writeToParcel(Parcel parcel, int i) {
-        parcel.writeString(username);
-        parcel.writeString(message);
-        parcel.writeString(date);
     }
 }

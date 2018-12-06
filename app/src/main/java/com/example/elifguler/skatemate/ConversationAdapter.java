@@ -48,12 +48,10 @@ public class ConversationAdapter extends RecyclerView.Adapter<ConversationAdapte
             holder.usernameTextView.setText((conversation.username1.equals(clientUsername)) ?
                     conversation.username2 : conversation.username1);
 
-            String messageString = conversation.messageStrings.get(conversation.messageStrings.size() - 1).substring(1);
-            String message = messageString.substring(messageString.indexOf("$") + 1, messageString.lastIndexOf("$"));
-            holder.messageTextView.setText(message);
+            Message message = conversation.messages.get(conversation.messages.size() - 1);
+            holder.messageTextView.setText(message.messageText);
 
-            //long dateLong = Long.parseLong(messageString.substring(messageString.lastIndexOf("$") + 1));
-            holder.dateTextView.setText(new SimpleDateFormat().format(new Date()));
+            holder.dateTextView.setText(message.date);
         }
     }
 
